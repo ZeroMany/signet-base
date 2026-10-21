@@ -97,16 +97,17 @@ static void handle_command(int command, void *p)
 					CFSetGetValues(refs, values);
 					g_hid_dev = (IOHIDDeviceRef)values[0];
 					g_device_type = SIGNETDEV_DEVICE_ORIGINAL; //TODO
-					int rc = open_device(g_hid_dev);
-					int i;
-					if (!rc) {
-						CFRelease((CFTypeRef)values[0]);
-					}
-					for (i = 1; i < ref_count; i++) {
-						CFRelease((CFTypeRef)values[i]);
+					// The set owns these devices, so they are not released
+					// one by one. Keep our own reference to the one we use.
+					if (open_device(g_hid_dev)) {
+						CFRetain((CFTypeRef)g_hid_dev);
+					} else {
+						g_hid_dev = NULL;
+						g_device_type = SIGNETDEV_DEVICE_NONE;
 					}
 					free(values);
 				}
+				CFRelease(refs);
 			}
 		}
 		if (g_hid_dev == NULL) {
@@ -217,7 +218,9 @@ static void input_callback(void *context, IOReturn ret, void *sender, IOHIDRepor
 	static u8 recv_packet[MAX_HID_PACKET_SIZE];
 	static int recv_byte = 0;
 	int i = 0;
-	while (i <= len) {
+	// Loop until every received byte is used. The old test (i <= len) never
+	// ended for an empty report and dropped bytes from long ones.
+	while (len > 0) {
 	int rem = signetdev_priv_hid_packet_size() - recv_byte;
 	int to_copy;
 	if (len <= rem) {
@@ -232,6 +235,9 @@ static void input_callback(void *context, IOReturn ret, void *sender, IOHIDRepor
 	if (recv_byte == signetdev_priv_hid_packet_size()) {
 		recv_byte = 0;
 		struct hid_packet *p = (struct hid_packet *)malloc(sizeof(struct hid_packet));
+		if (!p) {
+			break;
+		}
 		memcpy(p->data, recv_packet, signetdev_priv_hid_packet_size());
 		p->next = NULL;
 		if (hid_packet_first == NULL) {
@@ -273,14 +279,18 @@ static void attach_callback(void *context, IOReturn r, void *hid_mgr, IOHIDDevic
 	int vid;
 	int pid;
 
+	// IOHIDDeviceGetProperty does not hand over ownership, so these values
+	// must not be released here (doing so freed them twice).
 	CFNumberRef num;
 	num = IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDVendorIDKey));
-	CFNumberGetValue(num, kCFNumberIntType, &vid);
-	CFRelease(num);
+	if (!num || !CFNumberGetValue(num, kCFNumberIntType, &vid)) {
+		return;
+	}
 
 	num = IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDProductIDKey));
-	CFNumberGetValue(num, kCFNumberIntType, &pid);
-	CFRelease(num);
+	if (!num || !CFNumberGetValue(num, kCFNumberIntType, &pid)) {
+		return;
+	}
 
 	int match_found = 0;
 

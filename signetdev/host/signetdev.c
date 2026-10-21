@@ -946,6 +946,10 @@ void signetdev_priv_handle_command_resp(void *user, int token,
 			cb_resp.total_progress = resp[0] + (resp[1] << 8);
 			cb_resp.total_progress_maximum = resp[2] + (resp[3] << 8);
 			int k = (resp_len/4) - 1;
+			int max_k = (int)(sizeof(cb_resp.progress) / sizeof(cb_resp.progress[0]));
+			if (k > max_k) {
+				k = max_k;
+			}
 			int i;
 			cb_resp.n_components = k;
 			for (i = 0; i < k; i++) {
@@ -1134,22 +1138,35 @@ void signetdev_priv_process_rx_packet(struct rx_message_state *state, u8 *rx_pac
 		signetdev_priv_handle_device_event(event_type, data, resp_len);
 	} else if (state->message) {
 		if (seq == 0) {
-			state->expected_resp_size = rx_packet_header[0] + ((unsigned int)rx_packet_header[1] << 8) - CMD_PACKET_HEADER_SIZE;
+			/* The size comes from the device: never let it exceed the
+			 * response buffer, or wrap around when it is too small. */
+			unsigned int declared_size = rx_packet_header[0] + ((unsigned int)rx_packet_header[1] << 8);
+			if (declared_size < CMD_PACKET_HEADER_SIZE) {
+				declared_size = CMD_PACKET_HEADER_SIZE;
+			}
+			state->expected_resp_size = declared_size - CMD_PACKET_HEADER_SIZE;
+			if (state->expected_resp_size > MAX_CMD_PACKET_PAYLOAD_SIZE) {
+				state->expected_resp_size = MAX_CMD_PACKET_PAYLOAD_SIZE;
+			}
 			state->expected_messages_remaining = rx_packet_header[3] + (rx_packet_header[4] << 8);
 			if (state->message->resp_code) {
 				*state->message->resp_code = rx_packet_header[2];
 			}
 			state->message->end_device_state = rx_packet_header[5];
-			memcpy(state->message->resp,
-				rx_packet_buf + RAW_HID_HEADER_SIZE + CMD_PACKET_HEADER_SIZE,
-				signetdev_priv_hid_payload_size() - CMD_PACKET_HEADER_SIZE);
+			if (state->message->resp) {
+				memcpy(state->message->resp,
+					rx_packet_buf + RAW_HID_HEADER_SIZE + CMD_PACKET_HEADER_SIZE,
+					signetdev_priv_hid_payload_size() - CMD_PACKET_HEADER_SIZE);
+			}
 		} else {
 			size_t to_read = signetdev_priv_hid_payload_size();
 			size_t offset = (signetdev_priv_hid_payload_size() * (size_t)seq) - CMD_PACKET_HEADER_SIZE;
-			if ((offset + to_read) > state->expected_resp_size) {
+			if (offset >= state->expected_resp_size) {
+				to_read = 0;
+			} else if ((offset + to_read) > state->expected_resp_size) {
 				to_read = (state->expected_resp_size - offset);
 			}
-			if (to_read > 0)
+			if (to_read > 0 && state->message->resp)
 				memcpy(state->message->resp + offset, rx_packet_header, to_read);
 		}
 		if (last) {
